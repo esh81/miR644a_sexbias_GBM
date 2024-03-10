@@ -1,0 +1,457 @@
+##R code##
+library("DESeq2")
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(ggrepel)
+library(miRNAtap)
+library(corrr)
+library(ggpubr)
+library(Hmisc)
+install.packages("survminer")
+library("survminer")
+require("survival")
+library(rtracklayer)
+library(matrixStats)
+library(Seurat)
+
+
+#Fig 2A#
+read.csv("normalized_counts_mIRNA.txt", sep="\t") -> norm_counts_miRNA
+read.csv("noac220_suppl_supplementary_table_s1.txt", sep="\t") -> metad
+metad %>% filter(IDH1.status=="wt") -> idh_wt
+idh_wt %>% mutate(id = paste("X", Patient.ID, sep="")) -> idh_wt
+norm_counts_miRNA %>% rename(gene=X) %>% pivot_longer(!gene, names_to="id", values_to="norm_count") %>% mutate(pt_id=id) %>%
+separate(id, sep="_", c("id", "status", "D", "sex")) %>% left_join(idh_wt, ., by="id") -> idh_wt_miRNA_counts
+idh_wt_miRNA_counts %>% select(sex, pt_id) %>% group_by(pt_id) %>% summarise(n()) %>% select(pt_id) %>% mutate(test1=pt_id) %>% 
+separate(test1, sep="_", c("id", "status", "D", "sex")) -> meta2
+meta2 %>% tibble::column_to_rownames("pt_id") -> m2
+
+idh_wt_miRNA_counts %>% select(pt_id, gene, norm_count) %>% pivot_wider(names_from=pt_id, values_from=norm_count) -> wide_idh_wt_counts_miRNA
+wide_idh_wt_counts_miRNA %>% tibble::column_to_rownames("gene") -> df1 
+
+df1 <- df1[, rownames(m2)]
+
+dds <- DESeqDataSetFromMatrix(countData = round(df1),
+                              colData = m2,
+                              design = ~ sex)
+dds <- DESeq(dds)
+res <- results(dds)
+results(dds, tidy=TRUE) %>% arrange(padj) -> dds_results_df 
+dds_results_df %>% mutate(type= case_when(log2FoldChange > 0 & padj <0.1 ~ "blue", log2FoldChange <0 & padj< 0.1 ~ "pink", TRUE ~ "else")) -> df
+
+df$delabel <- NA
+df$delabel[df$type != "else"] <- df$row[df$type != "else"]
+
+df %>% ggplot(aes(x=log2FoldChange, y=-log10(pvalue), color=type, label=miR)) + geom_point() + theme_minimal() + 
+scale_color_manual(values=c("#56941E", "black", "#7B52AE")) + geom_text_repel(force=20, force_pull = 5) + theme(legend.position = "none") +
+ggtitle("Differentially Expressed miRNAs between Males and Females") + labs(x="log2FoldChange (Male/Female)")
+
+
+
+#Fig 2B#
+miR_644a_targets <- getPredictedTargets('miR-644a',species='hsa') 
+g_hsa_miR_644a_targets <- read.csv("gProfiler_hsa_miR_644a_targets.csv", sep=",") %>% dplyr::select(name) 
+
+read.csv("normalized_counts_mRNA.txt", sep="\t") -> norm_counts_mRNA
+rownames(m2) -> ptids
+norm_counts_mRNA %>% pivot_longer(!X, names_to="pt_id", values_to="expr") %>% mutate(test=pt_id) %>%
+separate(pt_id, sep="_", c("id","a","b","c","d")) %>% filter(id %in% m2$id) -> filt_mRNA 
+filt_mRNA %>% filter(X %in% g_hsa_miR_644a_targets$name) %>% mutate(miRNA="hsa-miR-644a") -> miR_644a
+
+miR_644a %>% dplyr::select(test, X, expr) %>% group_by(test) %>% pivot_wider(id_cols=test, names_from="X", values_from="expr") %>% 
+mutate(test2=test) %>% separate(test2, sep="_", c("id", "status", "a", "b", "c")) %>% mutate(miRNA="hsa-miR-644a") %>%
+left_join(.,df4, by=c("id", "status", "miRNA")) -> d4
+
+d4 %>% tibble::column_to_rownames("test") %>% dplyr::select(-c(id,status,a,b,c,miRNA,sex)) -> d_644a
+cor_644a <- correlate(d_644a,method = "spearman")
+cor_644a %>% focus(norm_count) %>% dplyr::rename(cor_644a = norm_count)-> cor_644a
+rcorr(as.matrix(d_644a),type="spearman") %>% `[[`('P') %>% corrr::as_cordf() %>% focus(norm_count) %>% 
+dplyr::rename(pval_cor = norm_count) %>% inner_join(., cor_644a, by="term") %>% filter(cor_644a < 0) -> miR_644a_cor_df 
+
+
+
+#Fig 2C# 
+norm_counts_miRNA %>% filter(X == "hsa-miR-644a") %>% pivot_longer(!X, names_to="pt_test", values_to="expr") %>% 
+separate(pt_test, sep="_", c("pt", "status", "d", "sex")) %>% select(pt, status, sex, expr) %>% dplyr::rename(miR644a = expr) -> miR644a_df
+
+norm_counts_mRNA %>% filter(X %in% c("MAPK9", "PTPRR")) %>% pivot_longer(!X, names_to="pt_test", values_to="expr") %>% 
+separate(pt_test, sep="_", c("pt", "status", "a", "b", "sex")) %>% select(pt, status, X, expr) -> targets_df
+
+inner_join(miR644a_df, targets_df, by=c("pt", "status")) %>% pivot_wider(names_from=X, values_from=expr) -> df1
+
+df1 %>% select(-pt, -status) %>% pivot_longer(!c("sex", "miR644a"), names_to="target", values_to="expr") %>% 
+filter(target=="MAPK9") %>%  ggscatter(x="miR644a", y="expr", add="reg.line") +
+stat_cor(method = "pearson", label.x=200) + theme_minimal() +
+labs(x="miR-644a expression", y="MAPK9 expression", title="
+miR-644a Correlated with MAPK9 Expression") 
+ggsave("kashani_miR644_MAPK9_scatter.pdf") 
+
+df1 %>% select(-pt, -status) %>% pivot_longer(!c("sex", "miR644a"), names_to="target", values_to="expr") %>% 
+filter(target=="PTPRR") %>%  ggscatter(x="miR644a", y="expr", add="reg.line") +
+stat_cor(method = "pearson", label.x=200) + theme_minimal() +
+labs(x="miR-644a expression", y="PTPRR expression", title="
+miR-644a Correlated with PTPRR Expression") 
+ggsave("kashani_miR644_PTPRR_scatter.pdf") 
+
+
+
+
+#Fig 3A# 
+norm_counts_miRNA %>% rename(gene=X) %>% pivot_longer(!gene, names_to="id", values_to="norm_count") %>% mutate(pt_id=id) %>%
+separate(id, sep="_", c("id", "status", "D", "sex")) %>% left_join(idh_wt, ., by="id") -> idh_wt_miRNA_counts
+as.numeric(idh_wt_miRNA_counts$Overall.survival) -> idh_wt_miRNA_counts$Overall.survival
+as.numeric(idh_wt_miRNA_counts$status.dead.1..alive.0) -> idh_wt_miRNA_counts$status.dead.1..alive.0
+
+fit <- survfit(Surv(OS, status.dead.1..alive.0) ~ sex, data = idh_wt_miRNA_counts)
+ggsurvplot(fit, data = idh_wt_miRNA_counts, 
+	pval=TRUE,  palette = c("#7B52AE", "#56941E"),
+	risk.table=FALSE, legend="right")) 
+ggsave("kashani_km_sex_240306.pdf") 
+
+
+
+#Fig 3B#
+idh_wt_miRNA_counts %>% mutate(OS = Overall.survival / 30) -> idh_wt_miRNA_counts
+miR644a %>% ggplot(aes(x=sex, y=norm_count, color=sex)) + geom_boxplot() +
+geom_jitter(alpha=0.4, width=0.3) + theme_minimal() +
+scale_color_manual(values=c("#7B52AE", "#56941E")) + labs(x="Sex", y="miR-644a expression") + 
+ggtitle("miR-644a Expression by Sex in Kashani et al") 
+ggsave("kashani_miR644a_sex_boxplots_240306.pdf") 
+
+ 
+ 
+ 
+#Fig 3C# 
+read.csv("gliovis_MAPK9_PTPRR_TCGA_240214.csv") %>% dplyr::rename(Sample = ï..Sample) -> gliovis_miRtargets
+read.csv("2024-02-14_TCGA_GBM_pheno.txt", sep="\t") -> gliovis_pheno
+
+gliovis_pheno %>% dplyr::select(Sample, survival, status, IDH1_status, Age, Gender) %>% filter(IDH1_status == "Wild-type") %>% 
+filter(Gender %in% c("Male", "Female")) %>% inner_join(., gliovis_miRtargets, by="Sample") %>%
+mutate(avg = rowMeans(dplyr::select(., c(MAPK9, PTPRR)))) -> miRtargets_idh_wt
+miRtargets_idh_wt %>% rename(sex = Gender, miR644a_score = avg) -> miRtargets_idh_wt
+res.cox <- coxph(Surv(survival, status) ~ miR644a_score +sex + Age, data = miRtargets_idh_wt) 
+summary(res.cox)
+ggforest(res.cox, data = miRtargets_idh_wt)
+ggsave("gliovis_TCGA_forestplot_240216.pdf")
+
+
+
+#Fig 4A# 
+gbmap <- readRDS('b46e8034-67ab-4b5c-8b74-43aebe9ee7e7.rds')
+subset(gbmap, cell_type %in% c("microglial cell", "B cell", "natural killer cell", "mature T cell",
+"oligodendrocyte", "dendritic cell", "monocyte", "malignant cell")) -> sub_noplasma_gbmap 
+
+sub_noplasma_gbmap <- NormalizeData(sub_noplasma_gbmap)
+sub_noplasma_gbmap <- FindVariableFeatures(sub_noplasma_gbmap , selection.method = "vst", nfeatures = 2000)
+all.genes <- rownames(sub_noplasma_gbmap)
+sub_noplasma_gbmap <- ScaleData(sub_noplasma_gbmap, features = all.genes)
+sub_noplasma_gbmap <- RunPCA(sub_noplasma_gbmap, features = VariableFeatures(object = sub_noplasma_gbmap))
+sub_noplasma_gbmap <- FindNeighbors(sub_noplasma_gbmap, dims = 1:10)
+sub_noplasma_gbmap <- FindClusters(sub_noplasma_gbmap, resolution = 0.5)
+
+DimPlot(sub_noplasma_gbmap, reduction = "umap", group.by="sex") + ggtitle("Sex") +
+scale_color_manual(values=c("#7B52AE", "#56941E"))
+ggsave("sub_noplasma_gbmap_sex_umap_240213.pdf", width=4, height=3) 
+
+DimPlot(sub_noplasma_gbmap, split.by="sex", reduction="umap", group.by="cell_type")
+ggsave("sub_noplasma_gbmap_celltype_umap_splitby_sex_240307.pdf", width=6, height=3) 
+system("cp sub_noplasma_gbmap_celltype_umap_splitby_sex_240307.pdf /home/honge2/isilon/ELLEN_HONG/miRSCAPE")
+
+
+
+#Fig 4B# 
+read.csv("gProfiler_hsa_miR_644a_targets.csv") -> miR644a_targets
+sub_noplasma_gbmap$barcode <- colnames(sub_noplasma_gbmap) 
+FetchData(sub_noplasma_gbmap, vars=c(miR644a_targets$converted_alias)) -> fetch_miR
+fetch_miR$non_zero_count <- apply(fetch_miR != 0, 1, sum) 
+
+fetch_miR %>% select(non_zero_count) %>% tibble::rownames_to_column("barcode") %>% left_join(test_df, ., by="barcode") -> test2_df
+test2_df %>% mutate(miR644a_expr_above_50 = count_greater_than_50_ENSG/non_zero_count) -> test2_df
+test2_df %>% mutate(miR644a_expr_above_75 = count_greater_than_75_ENSG/non_zero_count) -> test2_df
+
+sub_noplasma_gbmap@meta.data %>% select(cell_type, barcode) %>% left_join(test2_df, ., by="barcode") -> dfa
+
+dfc <- dfa
+dfc[dfc == 0] <- NA
+
+dfc %>% select(c(-UMAP_1, -UMAP_2, -no_zeros, -not_zero, -'25%', -'50%', -'75%', -count_greater_than_50_ENSG, -count_greater_than_75_ENSG,
+-non_zero_count, -miR644a_expr_above_50, -miR644a_expr_above_75)) %>% 
+pivot_longer(!c("cell_type", "sex", "barcode"), names_to="gene", values_to="expr") %>% group_by(gene, cell_type, sex) %>% 
+summarize(avg_expr = mean(expr, na.rm = TRUE)) -> dfd 
+
+type_order <- c("malignant cell", "oligodendrocyte", "microglial cell","dendritic cell",
+ "monocyte", "natural killer cell",  "mature T cell", "B cell") 
+ 
+dfd %>% filter(gene != "ENSG00000111640")%>% filter(cell_type != "plasma cell") %>% 
+ggplot(aes(x=factor(cell_type, level=type_order), y=log2(avg_expr), color=sex)) + 
+geom_boxplot() + scale_y_continuous(lim=c(-1.5,1.5)) + theme_minimal()+ 
+scale_color_manual(values=c("#7B52AE", "#56941E")) + 
+labs(x="Cell Type", y="Average Expression", title="Average Expression of miR-644a targets") 
+
+
+
+#Fig 5B# 
+read.csv("miR_targets_entrez_ensembl_240205.txt", sep="\t") -> miR_targets
+
+miR_gene_list <- miR_targets %>%
+  group_by(miR) %>%
+  summarize(ensembl_gene_list = list(unique(ensembl_gene_id)))
+
+calculate_mean_m_over_f <- function(gene_list, m_over_f_df) {
+  # Filter m_over_f dataframe to include only rows with genes in gene_list
+  filtered_df <- filter(m_over_f_df, gene %in% gene_list)
+  
+  # Calculate the mean m_over_f for the filtered genes, ignoring NaNs
+  mean_m_over_f <- mean(filtered_df$m_over_f, na.rm = TRUE)
+  
+  # Return the mean m_over_f
+  return(mean_m_over_f)
+}
+
+miR_gene_list <- miR_gene_list %>%
+  rowwise() %>%
+  mutate(mean_m_over_f = calculate_mean_m_over_f(ensembl_gene_list, m_over_f_df = m_over_f_df))
+
+calculate_med_m_over_f <- function(gene_list, m_over_f_df) {
+  # Filter m_over_f dataframe to include only rows with genes in gene_list
+  filtered_df <- filter(m_over_f_df, gene %in% gene_list)
+  
+  # Calculate the mean m_over_f for the filtered genes, ignoring NaNs
+  med_m_over_f <- median(filtered_df$m_over_f, na.rm = TRUE)
+  
+  # Return the mean m_over_f
+  return(med_m_over_f)
+}
+
+miR_gene_list <- miR_gene_list %>%
+  rowwise() %>%
+  mutate(med_m_over_f = calculate_med_m_over_f(ensembl_gene_list, m_over_f_df = m_over_f_df))
+
+perform_wilcox_test <- function(gene_list, m_over_f_df) {
+  # Filter m_over_f dataframe to include only rows with genes in gene_list
+  filtered_df <- filter(m_over_f_df, gene %in% gene_list)
+  
+  # Perform Wilcoxon rank sum test
+  wilcox_result <- wilcox.test(filtered_df$m_not_zero_mean, filtered_df$f_not_zero_mean)
+  
+  # Extract p-value from the test result
+  p_value <- wilcox_result$p.value
+  
+  # Return the p-value
+  return(p_value)
+}
+
+miR_gene_list <- miR_gene_list %>%
+  rowwise() %>%
+  mutate(wilcox_p_value = perform_wilcox_test(ensembl_gene_list, m_over_f_df = m_over_f_df))
+
+miR_gene_list %>% select(miR, ensembl_gene_list) -> miR_gene_list2
+
+test_perform_wilcox_test <- function(gene_list, df) {
+# Filter m_over_f dataframe to include only rows with genes in gene_list
+  filtered_df <- filter(df, gene %in% gene_list)
+  
+# Perform Wilcoxon rank sum test
+wilcox_result <- wilcox.test(filtered_df$avg_expr[filtered_df$sex == "male"], 
+filtered_df$avg_expr[filtered_df$sex == "female"], paired = TRUE)
+  
+  # Extract p-value from the test result
+  p_value <- wilcox_result$p.value
+
+  # Return the p-value
+  return(p_value)
+}
+
+miR_gene_list_real <- miR_gene_list2 %>%
+  rowwise() %>%
+  mutate(wilcox_p_value = test_perform_wilcox_test(ensembl_gene_list, m_over_f_df2))
+miR_gene_list_real$adjusted_p_values <- p.adjust(miR_gene_list_real$wilcox_p_value, method = "BH")
+
+miR_gene_list_real %>% saveRDS("miR_gene_list_real_0246PM_240206.rds") 
+
+
+
+which(rowSums(sub_noplasma_gbmap[["RNA"]]@data==0)/NCOL(sub_noplasma_gbmap[["RNA"]]@data) < 0.5) %>% as.data.frame() -> goodrows
+
+
+miR_gene_list <- readRDS("miR_gene_list_real_0246PM_240206.rds") 
+copy_miR_gene_list <- miR_gene_list 
+
+store_vector <- list()
+sub_noplasma_gbmap$cell_type_fixed <- gsub(' ','\\_',sub_noplasma_gbmap$cell_type)
+for (name in names(table(sub_noplasma_gbmap$cell_type_fixed ))){
+	subset(sub_noplasma_gbmap, cell_type_fixed == name) -> subset_celltype 
+	subset(subset_celltype, sex=="male") -> m_subset_celltype
+	subset(subset_celltype, sex=="female") -> f_subset_celltype
+	
+	store_vector[[name]] <- rep(NA, dim(copy_miR_gene_list)[1])
+
+for (k in 1:dim(copy_miR_gene_list)[1]) {
+	miR_name = copy_miR_gene_list$miR[k]
+	miR_targets = as.vector(copy_miR_gene_list$ensembl_gene_list[[k]])
+	miR_targets = intersect(rownames(goodrows), miR_targets) 
+	if(length(miR_targets)==0) {
+		temp1=NA
+}else	if(length(miR_targets)== 1) {
+		mean(m_subset_celltype[["RNA"]]@data[miR_targets,])/mean(f_subset_celltype[["RNA"]]@data[miR_targets,]) -> temp1 
+
+}else{
+	rowMeans(m_subset_celltype[["RNA"]]@data[miR_targets,])/rowMeans(f_subset_celltype[["RNA"]]@data[miR_targets,]) -> temp1 
+	}
+	mean(temp1)
+	store_vector[[name]][k] = mean(temp1)
+}
+
+names(store_vector[[name]]) = copy_miR_gene_list$miR 
+
+
+}
+
+
+
+
+store_vector %>% saveRDS("store_vector_1120AM_240208.rds") 
+
+list_of_dataframes <- lapply(store_vector , function(vec) {
+  data.frame(value = vec)
+})
+
+
+ranked_dfs <- lapply(list_of_dataframes, function(df) {
+  df <- tibble::rownames_to_column(df, "miR")  # Add rownames as a column named "miR"
+  df <- arrange(df, desc(value))  # Arrange the dataframe by the "value" column in descending order
+  df <- tibble::rownames_to_column(df, "rank")  # Add rownames as a column named "rank"
+  return(df)
+})
+
+value_columns <- lapply(names(list_of_dataframes), function(name) {
+  df <- list_of_dataframes[[name]]  # Extract the dataframe
+  value_col <- data.frame(value = df$value)  # Convert to dataframe
+  colnames(value_col) <- name  # Rename the column
+  return(value_col)
+})
+
+value_columns <- lapply(names(list_of_dataframes), function(name) {
+  df <- list_of_dataframes[[name]]  # Extract the dataframe
+  value_col <- data.frame(value = df$value)  # Convert to dataframe
+  colnames(value_col) <- name  # Rename the column
+  return(value_col)
+})
+
+
+combined_df <- do.call(cbind, value_columns)
+rownames(list_of_dataframes[["malignant_cell"]]) -> rownames(combined_df) 
+
+ranked_dfs_no_value <- lapply(ranked_dfs, select, -value)
+joined_df <- reduce(ranked_dfs_no_value, full_join, by = "miR")
+names(joined_df)[2:ncol(joined_df)] <- names(ranked_dfs)
+result_df <- joined_df
+
+
+calculate_zscore <- function(x) {
+  (x - mean(x, na.rm = TRUE)) / sd(x, na.rm = TRUE)
+}
+list_zscore_dfs <- lapply(list_of_dataframes, function(df) {
+  df %>%
+    mutate(zscore = calculate_zscore(value))
+})
+zscore_dfs <- lapply(names(list_zscore_dfs), function(name) {
+  df <- list_zscore_dfs[[name]]
+  df <- rename(df, !!name := zscore)  # Rename zscore column
+  df <- select(df, -value)            # Remove the "value" column
+  df <- tibble::rownames_to_column(df, "miR")  
+  df
+})
+final_df <- Reduce(function(x, y) {
+  full_join(x, y, by = "miR")
+}, zscore_dfs)
+
+
+celltype_order <- c("malignant_cell", "oligodendrocyte", "mature_T_cell", "B_cell",
+"microglial_cell", "natural_killer_cell" , "monocyte", "dendritic_cell") 
+
+miR644a_zscores <- final_df %>% filter(miR=="miR-644a") %>% 
+pivot_longer(!miR, names_to="cell_type", values_to="zscore")
+
+final_df %>% pivot_longer(!miR, names_to="cell_type", values_to="zscore") %>% 
+filter(cell_type != "plasma_cell") %>%
+ggplot(aes(x=zscore)) + geom_density(fill="lightgrey") + 
+geom_vline(data= miR644a_zscores, aes(xintercept = zscore, color="red")) + 
+geom_vline(xintercept = 0, linetype="dotted") +
+facet_wrap(. ~ factor(cell_type, level= celltype_order), ncol=2) + 
+scale_x_continuous(lim=c(-2.5,2.5)) + theme_classic() 
+
+
+
+#Fig 5C# 
+final_df %>% filter(miR=="miR-644a") %>% 
+dplyr::select(-plasma_cell) %>%
+pivot_longer(!miR, names_to="cell_type", values_to="zscore") %>%
+ggplot(aes(x=zscore, y=factor(cell_type, levels=celltype_order))) + geom_col() +
+theme_minimal() + labs(x="z-score of miR-644a target gene expr in M/F", y="cell type") + 
+ggtitle("miR-644a Target Gene Expression in Males/Females by Cell Type") 
+
+
+#Fig 6B# 
+read.csv("GSE79735_GEO_Table_Matrix_RBPJ.txt", sep="\t") %>% dplyr::rename(name=gene_id) -> g3691
+
+df_aus_filtered %>% dplyr::rename(gene_id = Associated.Gene.Name) %>% inner_join(., df_L_filtered, by="gene_id") -> df_all_filt
+df_all_filt %>% filter(!gene_id %in% sexchr_Ls$gene_id) %>% filter(!gene_id %in% sexchr_aus$Associated.Gene.Name) -> df_nosexchr
+
+L0_gtf <- import("Sample1_rpkm.gtf")
+L1_gtf <- import("Sample2_rpkm.gtf")
+L2_gtf <- import("Sample3_rpkm.gtf")
+L0_gtf %>% as.data.frame() %>% filter(type=="transcript") %>% dplyr::select(gene_id, RPKM) %>% dplyr::rename(L0=RPKM) -> L0 
+L1_gtf %>% as.data.frame() %>% filter(type=="transcript") %>% dplyr::select(gene_id, RPKM) %>% dplyr::rename(L1=RPKM) -> L1
+L2_gtf %>% as.data.frame() %>% filter(type=="transcript") %>% dplyr::select(gene_id, RPKM) %>% dplyr::rename(L2=RPKM) -> L2
+
+df_aus <- read.csv("aus_rnaseq_230925.txt", sep="\t")
+df_aus %>% select(HW1, PB1, RN1, SB2b, WK1, Associated.Gene.Name) -> aus_lines
+columns_to_check <- names(aus_lines)[1:5]  
+df_aus_filtered <- aus_lines %>% filter(rowSums(.[, columns_to_check] != 0) == 5)
+read.csv("aus_rnaseq_230925.txt", sep="\t") %>% filter(Chromosome.Name == "X" | Chromosome.Name == "Y") -> sexchr
+
+inner_join(L0, L1, by="gene_id") %>% inner_join(., L2, by="gene_id") -> df_L
+as.numeric(df_L$L0) -> df_L$L0
+as.numeric(df_L$L1) -> df_L$L1
+as.numeric(df_L$L2) -> df_L$L2
+df_L %>% distinct(gene_id, .keep_all = TRUE) -> df_L
+
+mack_df <- read.csv("GSE119834_fpkm_table.txt", sep="\t") %>% dplyr::select(GSC41, GSC9, symbol) %>% 
+dplyr::rename(DI318 = GSC41, GSC23=GSC9) 
+
+inner_join(aus_lines, df_L, by="name") %>% inner_join(., g3691, by="name") %>% inner_join(., mack_df, by="name") -> df_all
+df_all %>% filter(!name %in% sexchr$Associated.Gene.Name) -> df_nosexchr
+
+getPredictedTargets('miR-644a',species='hsa', min_src = 2) %>% as.data.frame() %>% tibble::rownames_to_column("initial_alias") -> targets_644a
+targets_644a %>% filter(rank_final <= 44) %>% inner_join(., miR_644a, by="initial_alias") -> top10
+
+inner_join(aus_lines, df_L, by="name") %>% inner_join(., g3691, by="name") %>% inner_join(., mack_df, by="name") -> df_all
+df_all %>% filter(!name %in% sexchr$Associated.Gene.Name) -> df_nosexchr
+
+columns_to_rank_transform <- setdiff(names(df_nosexchr), c("name"))
+no_sex_rank_df <- df_nosexchr %>% mutate_at(vars(columns_to_rank_transform), function(x) (rank(x) - 1) / (length(x) - 1)) 
+no_sex_rank_df %>% dplyr::select(-name) -> df1a
+medians <- rowMedians(as.matrix(df1a)) 
+no_sex_rank_df$median <- medians
+no_sex_rank_df %>% filter(median > 0.2) -> expr_nosex_rank_df
+
+expr_nosex_rank_df %>% dplyr::select(-median) %>% filter(name %in% top10$name) %>% 
+pivot_longer(!name, names_to="cell_line", values_to="rank") %>%
+mutate(sex=case_when(cell_line %in% c("HW1", "L1", "L2") ~ "F", TRUE ~ "M")) -> df1
+
+df1 %>% group_by(cell_line, sex) %>% summarise(mean_rank = mean(rank)) %>% 
+ggplot(aes(x=sex, y=mean_rank, color=sex)) + geom_boxplot() + labs(y="mean rank expr") +
+scale_color_manual(values=c("#7B52AE", "#56941E")) + theme_minimal() 
+ggsave("ourlines_rnaseq_644atargets_sex_fishers_240229.pdf") 
+
+wilcox.test(rank ~ sex, data = df1,exact = FALSE, alternative="less")
+
+order_sex <- c("M", "F") 
+df1 %>% group_by(cell_line, sex) %>% summarise(mean_rank = mean(rank)) %>% 
+ungroup() %>% ggplot(aes(x=factor(sex, levels=order_sex), y=mean_rank, color=sex)) + 
+geom_boxplot(outlier.shape = NA,width=0.5) +  geom_jitter(width=0.1) + labs(y="mean expr (rank norm)", x="Sex") +
+scale_color_manual(values=c("#7B52AE", "#56941E")) + 
+theme_minimal() + ggtitle("Average Expression of miR-644a targets")
+
